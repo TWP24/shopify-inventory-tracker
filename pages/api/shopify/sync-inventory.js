@@ -1,4 +1,4 @@
-﻿import { getProducts, getInventoryLevels } from '../../../lib/shopify'
+import { getProducts } from '../../../lib/shopify'
 import { supabase } from '../../../lib/supabase'
 
 export default async function handler(req, res) {
@@ -8,57 +8,50 @@ export default async function handler(req, res) {
 
   try {
     const shopifyProducts = await getProducts()
-    const inventoryLevels = await getInventoryLevels()
-
-    const inventoryMap = {}
-    inventoryLevels.forEach(level => {
-      inventoryMap[level.inventory_item_id] = level.available
-    })
 
     for (const product of shopifyProducts) {
       for (const variant of product.variants) {
-        const currentStock = inventoryMap[variant.inventory_item_id] || 0
-
         const { data: existing } = await supabase
           .from('products')
           .select('*')
           .eq('sku', variant.sku)
           .single()
 
+        const productData = {
+          sku: variant.sku || `${product.id}-${variant.id}`,
+          name: `${product.title} - ${variant.title}`,
+          shopify_product_id: product.id,
+          shopify_variant_id: variant.id,
+          current_stock: variant.inventory_quantity || 0,
+          cogs: 0,
+          reorder_point: 10,
+          reorder_quantity: 50,
+          lead_time_days: 14,
+          updated_at: new Date().toISOString()
+        }
+
         if (existing) {
           await supabase
             .from('products')
-            .update({
-              current_stock: currentStock,
-              shopify_product_id: product.id,
-              shopify_variant_id: variant.id,
-              updated_at: new Date().toISOString()
-            })
+            .update(productData)
             .eq('id', existing.id)
         } else {
           await supabase
             .from('products')
-            .insert({
-              sku: variant.sku,
-              name: `${product.title} - ${variant.title}`,
-              shopify_product_id: product.id,
-              shopify_variant_id: variant.id,
-              current_stock: currentStock,
-              cogs: 0,
-              reorder_point: 10,
-              reorder_quantity: 50,
-              lead_time_days: 14
-            })
+            .insert(productData)
         }
       }
     }
 
     return res.status(200).json({ 
       success: true, 
-      message: `Synced ${shopifyProducts.length} products` 
+      message: `Synced ${shopifyProducts.length} products`
     })
   } catch (error) {
     console.error('Sync error:', error)
-    return res.status(500).json({ error: error.message })
+    return res.status(500).json({ 
+      error: error.message,
+      details: error.response?.data || 'No additional details'
+    })
   }
 }
