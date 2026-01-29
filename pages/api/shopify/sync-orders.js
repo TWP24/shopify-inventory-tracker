@@ -1,4 +1,4 @@
-﻿import { getOrders } from '../../../lib/shopify'
+import { getOrders } from '../../../lib/shopify'
 import { supabase } from '../../../lib/supabase'
 
 export default async function handler(req, res) {
@@ -7,10 +7,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    const thirtyDaysAgo = new Date()
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+    const ninetyDaysAgo = new Date()
+    ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90)
     
-    const orders = await getOrders(thirtyDaysAgo.toISOString())
+    const orders = await getOrders(ninetyDaysAgo.toISOString())
 
     for (const order of orders) {
       for (const item of order.line_items) {
@@ -39,11 +39,11 @@ export default async function handler(req, res) {
         .from('sales_history')
         .select('quantity')
         .eq('product_id', product.id)
-        .gte('date', thirtyDaysAgo.toISOString().split('T')[0])
+        .gte('date', ninetyDaysAgo.toISOString().split('T')[0])
 
       if (sales && sales.length > 0) {
         const totalSales = sales.reduce((sum, s) => sum + parseFloat(s.quantity), 0)
-        const avgDailySales = totalSales / 30
+        const avgDailySales = totalSales / 90
 
         await supabase
           .from('products')
@@ -54,7 +54,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ 
       success: true, 
-      message: `Processed ${orders.length} orders` 
+      message: `Processed ${orders.length} orders from last 90 days` 
     })
   } catch (error) {
     console.error('Order sync error:', error)
