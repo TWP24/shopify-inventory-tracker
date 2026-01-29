@@ -1,0 +1,16 @@
+﻿{
+  "crons": [
+    {
+      "path": "/api/shopify/sync-inventory",
+      "schedule": "0 */4 * * *"
+    },
+    {
+      "path": "/api/shopify/sync-orders",
+      "schedule": "0 1 * * *"
+    },
+    {
+      "path": "/api/alerts/send-slack",
+      "schedule": "0 9 * * *"
+    }
+  ]
+}
