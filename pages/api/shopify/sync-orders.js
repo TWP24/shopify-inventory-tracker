@@ -1,5 +1,24 @@
-import { getOrders } from '../../../lib/shopify'
+import axios from 'axios'
 import { supabase } from '../../../lib/supabase'
+
+async function shopifyGraphQL(query, variables = {}) {
+  const response = await axios.post(
+    `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION}/graphql.json`,
+    { query, variables },
+    {
+      headers: {
+        'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN,
+        'Content-Type': 'application/json'
+      }
+    }
+  )
+  
+  if (response.data.errors) {
+    throw new Error(JSON.stringify(response.data.errors))
+  }
+  
+  return response.data.data
+}
 
 export default async function handler(req, res) {
   if (req.query.secret !== process.env.CRON_SECRET) {
@@ -10,54 +29,95 @@ export default async function handler(req, res) {
     const ninetyDaysAgo = new Date()
     ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90)
     
-    const orders = await getOrders(ninetyDaysAgo.toISOString())
-
-    for (const order of orders) {
-      for (const item of order.line_items) {
-        const { data: product } = await supabase
-          .from('products')
-          .select('*')
-          .eq('sku', item.sku)
-          .single()
-
-        if (product) {
-          await supabase
-            .from('sales_history')
-            .insert({
-              product_id: product.id,
-              date: new Date(order.created_at).toISOString().split('T')[0],
-              quantity: item.quantity
-            })
+    // Get all line items sold in last 90 days using GraphQL
+    const query = `
+      query getOrders($query: String!, $first: Int!, $after: String) {
+        orders(first: $first, query: $query, after: $after) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          edges {
+            node {
+              id
+              createdAt
+              lineItems(first: 250) {
+                edges {
+                  node {
+                    sku
+                    quantity
+                  }
+                }
+              }
+            }
+          }
         }
       }
-    }
-
-    const { data: products } = await supabase.from('products').select('*')
-
-    for (const product of products) {
-      const { data: sales } = await supabase
-        .from('sales_history')
-        .select('quantity')
-        .eq('product_id', product.id)
-        .gte('date', ninetyDaysAgo.toISOString().split('T')[0])
-
-      if (sales && sales.length > 0) {
-        const totalSales = sales.reduce((sum, s) => sum + parseFloat(s.quantity), 0)
-        const avgDailySales = totalSales / 90
-
-        await supabase
-          .from('products')
-          .update({ daily_avg_sales: avgDailySales })
-          .eq('id', product.id)
+    `
+    
+    const searchQuery = `created_at:>='${ninetyDaysAgo.toISOString().split('T')[0]}'`
+    
+    let hasNextPage = true
+    let cursor = null
+    let allLineItems = {}
+    let orderCount = 0
+    
+    while (hasNextPage) {
+      const variables = {
+        query: searchQuery,
+        first: 250,
+        after: cursor
       }
+      
+      const data = await shopifyGraphQL(query, variables)
+      
+      // Process line items
+      data.orders.edges.forEach(orderEdge => {
+        orderCount++
+        orderEdge.node.lineItems.edges.forEach(lineItemEdge => {
+          const sku = lineItemEdge.node.sku
+          const qty = lineItemEdge.node.quantity
+          
+          if (sku) {
+            if (!allLineItems[sku]) {
+              allLineItems[sku] = 0
+            }
+            allLineItems[sku] += qty
+          }
+        })
+      })
+      
+      hasNextPage = data.orders.pageInfo.hasNextPage
+      cursor = data.orders.pageInfo.endCursor
+      
+      console.log(`Processed ${orderCount} orders, SKUs tracked: ${Object.keys(allLineItems).length}`)
+      
+      // Rate limit
+      await new Promise(resolve => setTimeout(resolve, 500))
     }
-
+    
+    // Update daily averages in database
+    const { data: products } = await supabase.from('products').select('*')
+    
+    for (const product of products) {
+      const totalSold = allLineItems[product.sku] || 0
+      const avgDailySales = totalSold / 90
+      
+      await supabase
+        .from('products')
+        .update({ daily_avg_sales: avgDailySales })
+        .eq('id', product.id)
+    }
+    
     return res.status(200).json({ 
       success: true, 
-      message: `Processed ${orders.length} orders from last 90 days` 
+      message: `Processed ${orderCount} orders, updated ${Object.keys(allLineItems).length} SKUs` 
     })
   } catch (error) {
-    console.error('Order sync error:', error)
-    return res.status(500).json({ error: error.message })
+    console.error('GraphQL sync error:', error)
+    return res.status(500).json({ 
+      error: error.message,
+      details: error.response?.data || 'No additional details'
+    })
   }
 }
